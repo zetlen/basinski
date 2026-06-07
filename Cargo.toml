@@ -1,6 +1,6 @@
 [package]
 name = "basinski"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Rescues media files from their own disintegration. Named for William Basinski's Disintegration Loops."
 license = "GPL-3.0-or-later"
