@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! EBML primitives: variable-length integers, element headers, and builders for
 //! synthesizing a Matroska head. Hand-rolled on purpose; no ffmpeg.
-// Items are consumed by mkv_codecs and matroska (Tasks 3–5); suppress dead-code
-// lint until those modules are added.
-#![allow(dead_code)]
 
 /// Read an EBML variable-length integer (data size) at `pos`.
 /// Returns `(value_without_marker, length_in_bytes)`, or `None` if malformed.
@@ -79,6 +76,7 @@ pub const ID_DOCTYPE_VERSION: u32 = 0x4287;
 pub const ID_DOCTYPE_READ_VERSION: u32 = 0x4285;
 
 pub const ID_SEGMENT: u32 = 0x18538067;
+#[allow(dead_code)] // Defined for completeness / future tiers
 pub const ID_SEEKHEAD: u32 = 0x114D9B74;
 pub const ID_INFO: u32 = 0x1549A966;
 pub const ID_TIMECODE_SCALE: u32 = 0x2AD7B1;
@@ -103,6 +101,7 @@ pub const ID_CLUSTER: u32 = 0x1F43B675;
 pub const ID_TIMECODE: u32 = 0xE7;
 pub const ID_SIMPLE_BLOCK: u32 = 0xA3;
 pub const ID_BLOCK_GROUP: u32 = 0xA0;
+#[allow(dead_code)] // Defined for completeness / future tiers
 pub const ID_BLOCK: u32 = 0xA1;
 
 /// Minimal canonical byte length of an element ID (its marker is intrinsic).

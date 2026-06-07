@@ -2,8 +2,6 @@
 //! Matroska/WebM analysis and re-heading. Walks surviving clusters, sniffs each
 //! track's codec from frame bytes, and synthesizes a fresh container head
 //! (EBML + Segment + Info + Tracks) — copying clusters verbatim, never decoding.
-// Consumers wired in rescue.rs (a later task); suppress dead-code until then.
-#![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
 

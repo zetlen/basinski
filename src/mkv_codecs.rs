@@ -2,9 +2,6 @@
 //! Codec identification and per-codec Matroska head synthesis for the
 //! reconstructive (Tier 2) re-head. WebM-native codecs (VP8/VP9/AV1/Opus) are
 //! parsed here; H.264-in-Matroska delegates to `h264.rs`/`divine.rs` (Plan 3).
-// Items are consumed by matroska (Task 5); suppress dead-code lint until that
-// module is added.
-#![allow(dead_code)]
 
 use crate::ebml::{self, el, uint};
 use std::collections::BTreeSet;
@@ -13,9 +10,12 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Codec {
     Vp9 { width: u32, height: u32 },
+    #[allow(dead_code)] // Constructed in Plan 3 (VP8/AV1/H.264-in-MKV).
     Vp8 { width: u32, height: u32 },
+    #[allow(dead_code)] // Constructed in Plan 3 (VP8/AV1/H.264-in-MKV).
     Av1 { width: u32, height: u32, config: Vec<u8> },
     Opus { channels: u8 },
+    #[allow(dead_code)] // Constructed in Plan 3 (VP8/AV1/H.264-in-MKV).
     H264 { codec_private: Vec<u8>, width: u32, height: u32 },
     /// Parameters live in the lost `Tracks` and cannot be synthesized from
     /// frames (Vorbis codebooks, AAC AudioSpecificConfig) or could not be
