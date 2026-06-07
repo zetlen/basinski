@@ -5,7 +5,7 @@
 // Consumers wired in rescue.rs (a later task); suppress dead-code until then.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{bail, Result};
 
@@ -76,18 +76,27 @@ fn parse_simpleblock(buf: &[u8]) -> Option<SampledBlock> {
 /// Collect up to `per_track` sample frames per track, scanning clusters from
 /// `first_cluster` forward until every seen track has enough samples or the
 /// data runs out.
+///
+/// A cluster that starts mid-GOP yields only inter frames; keep scanning so
+/// the first keyframe (which carries the codec's geometry, e.g. a VP9
+/// keyframe header) lands in the sample even after the per-track soft cap.
 pub fn sample_frames(
     data: &[u8],
     first_cluster: usize,
     per_track: usize,
 ) -> BTreeMap<u64, Vec<(bool, Vec<u8>)>> {
     let mut samples: BTreeMap<u64, Vec<(bool, Vec<u8>)>> = BTreeMap::new();
+    let mut have_keyframe: BTreeSet<u64> = BTreeSet::new();
     let mut pos = first_cluster;
     let mut clusters_scanned = 0;
     while pos < data.len() && clusters_scanned < SAMPLE_CLUSTERS {
         let Some(next) = walk_cluster(data, pos, |b| {
+            let need_keyframe = b.keyframe && !have_keyframe.contains(&b.track);
             let entry = samples.entry(b.track).or_default();
-            if entry.len() < per_track {
+            if entry.len() < per_track || need_keyframe {
+                if b.keyframe {
+                    have_keyframe.insert(b.track);
+                }
                 entry.push((b.keyframe, b.frame));
             }
         }) else {
@@ -479,6 +488,34 @@ mod tests {
         assert_eq!(h.first_cluster, c1_off);
         assert_eq!(h.first_keyframe_cluster, Some(c2_off));
         assert_eq!(h.bytes_lost, c2_off);
+    }
+
+    #[test]
+    fn analyze_finds_vp9_when_first_cluster_is_all_inter() {
+        // Real casework: the first surviving cluster starts mid-GOP with only VP9
+        // inter frames (no keyframe); the keyframe is in the next cluster.
+        // sample_frames must still capture that keyframe so the track sniffs as VP9
+        // and is NOT mistaken for Opus (VP9 inter frames share a constant top-5-bit
+        // "config").
+        let vp9_inter: &[u8] = &[0x86, 0x00, 0x40, 0x96, 0xA8, 0x4C, 0x50, 0xE1];
+
+        let mut c1 = uint(ID_TIMECODE, 0);
+        for _ in 0..8 {
+            c1.extend(simple_block(1, false, vp9_inter)); // 8 inter frames, no keyframe
+        }
+        let c1 = el(ID_CLUSTER, &c1);
+
+        let mut c2 = uint(ID_TIMECODE, 100);
+        c2.extend(simple_block(1, true, VP9_KEYFRAME)); // keyframe-flagged VP9 keyframe
+        let c2 = el(ID_CLUSTER, &c2);
+
+        let mut buf = vec![0xAB; 8];
+        buf.extend_from_slice(&c1);
+        buf.extend_from_slice(&c2);
+
+        let Analysis::Heavy(h) = analyze(&buf) else { panic!("expected Heavy") };
+        let t1 = h.tracks.iter().find(|t| t.number == 1).expect("track 1");
+        assert_eq!(t1.codec, Codec::Vp9 { width: 1920, height: 1080 });
     }
 
     fn window(haystack: &[u8], needle: &[u8]) -> Option<usize> {

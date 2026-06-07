@@ -40,15 +40,18 @@ pub fn sniff(frames: &[(bool, Vec<u8>)]) -> Codec {
         }
     }
     // Audio: Opus packets share a constant TOC config (top 5 bits) across a clip.
-    // Require at least 2 frames or a keyframe-flagged frame to avoid misidentifying
-    // a single unrecognized blob as Opus.
+    // Matroska/WebM audio SimpleBlocks are ALWAYS keyframe-flagged, so require
+    // at least one keyframe-flagged frame. VP9 inter frames (the false-positive
+    // source) are never keyframe-flagged and happen to share a constant top-5-bit
+    // value; VP9 detection above catches tracks that do have a keyframe, so this
+    // guard closes the gap for inter-only samples.
     let has_keyframe = frames.iter().any(|(k, _)| *k);
     let configs: BTreeSet<u8> = frames
         .iter()
         .filter_map(|(_, f)| f.first().map(|b| b >> 3))
         .collect();
     if configs.len() == 1
-        && (frames.len() >= 2 || has_keyframe)
+        && has_keyframe
         && let Some((_, f0)) = frames.first()
         && let Some(&toc) = f0.first()
     {
@@ -267,14 +270,14 @@ mod tests {
     }
 
     #[test]
-    fn sniff_identifies_opus_from_two_unflagged_frames() {
-        // Two non-keyframe frames sharing a constant TOC config still sniff as Opus
-        // via the `frames.len() >= 2` branch of the guard.
+    fn sniff_rejects_unflagged_constant_config_as_opus() {
+        // Non-keyframe frames sharing a constant top-5-bit value look like a VP9
+        // inter-frame run, not Opus (audio frames are always keyframe-flagged).
         let frames = vec![
             (false, vec![0xFC, 0x11, 0x22]),
             (false, vec![0xFC, 0x33, 0x44]),
         ];
-        assert_eq!(sniff(&frames), Codec::Opus { channels: 2 });
+        assert!(matches!(sniff(&frames), Codec::NeedsDonor { .. }));
     }
 
     /// Tiny substring search for assertions.
