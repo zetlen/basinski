@@ -9,6 +9,9 @@ name: release-plz
 # with the default GITHUB_TOKEN does not trigger CI, so under branch protection
 # its required checks never run and it can't be merged. The PAT also lets the
 # created release trigger the binary build in release.yml.
+#
+# CARGO_REGISTRY_TOKEN and RELEASE_PLZ_TOKEN are stored in the `prod` GitHub
+# Environment, so both jobs declare `environment: prod` to access them.
 
 on:
   push:
@@ -23,6 +26,8 @@ jobs:
   release:
     name: release
     runs-on: ubuntu-latest
+    # Secrets live in the `prod` GitHub Environment; a job must opt in to see them.
+    environment: prod
     permissions:
       contents: write
     steps:
@@ -42,6 +47,7 @@ jobs:
   release-pr:
     name: release-pr
     runs-on: ubuntu-latest
+    environment: prod
     permissions:
       contents: write
       pull-requests: write
