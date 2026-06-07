@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! EBML primitives: variable-length integers, element headers, and builders for
 //! synthesizing a Matroska head. Hand-rolled on purpose; no ffmpeg.
+// Items are consumed by mkv_codecs and matroska (Tasks 3–5); suppress dead-code
+// lint until those modules are added.
+#![allow(dead_code)]
 
 /// Read an EBML variable-length integer (data size) at `pos`.
 /// Returns `(value_without_marker, length_in_bytes)`, or `None` if malformed.
@@ -38,6 +41,111 @@ pub fn read_id(buf: &[u8], pos: usize) -> Option<(u32, usize)> {
         id = (id << 8) | buf[pos + k] as u32;
     }
     Some((id, len))
+}
+
+/// A parsed element header. `size: None` means an unknown-size element
+/// (legal for `Segment` and `Cluster`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Element {
+    pub id: u32,
+    pub size: Option<u64>,
+    /// Bytes consumed by the ID + size fields.
+    pub header_len: usize,
+    /// Absolute offset of the element's payload.
+    pub data_pos: usize,
+}
+
+/// Read one element header at `pos`. Does not descend into children.
+pub fn read_element(buf: &[u8], pos: usize) -> Option<Element> {
+    let (id, idlen) = read_id(buf, pos)?;
+    let (raw, szlen) = read_vint(buf, pos + idlen)?;
+    let unknown = raw == (1u64 << (7 * szlen as u32)) - 1;
+    Some(Element {
+        id,
+        size: if unknown { None } else { Some(raw) },
+        header_len: idlen + szlen,
+        data_pos: pos + idlen + szlen,
+    })
+}
+
+// --- Element IDs (with their length-marker bits, as stored on the wire) ---
+pub const ID_EBML: u32 = 0x1A45DFA3;
+pub const ID_EBML_VERSION: u32 = 0x4286;
+pub const ID_EBML_READ_VERSION: u32 = 0x42F7;
+pub const ID_EBML_MAX_ID_LEN: u32 = 0x42F2;
+pub const ID_EBML_MAX_SIZE_LEN: u32 = 0x42F3;
+pub const ID_DOCTYPE: u32 = 0x4282;
+pub const ID_DOCTYPE_VERSION: u32 = 0x4287;
+pub const ID_DOCTYPE_READ_VERSION: u32 = 0x4285;
+
+pub const ID_SEGMENT: u32 = 0x18538067;
+pub const ID_SEEKHEAD: u32 = 0x114D9B74;
+pub const ID_INFO: u32 = 0x1549A966;
+pub const ID_TIMECODE_SCALE: u32 = 0x2AD7B1;
+pub const ID_MUXING_APP: u32 = 0x4D80;
+pub const ID_WRITING_APP: u32 = 0x5741;
+
+pub const ID_TRACKS: u32 = 0x1654AE6B;
+pub const ID_TRACK_ENTRY: u32 = 0xAE;
+pub const ID_TRACK_NUMBER: u32 = 0xD7;
+pub const ID_TRACK_UID: u32 = 0x73C5;
+pub const ID_TRACK_TYPE: u32 = 0x83;
+pub const ID_CODEC_ID: u32 = 0x86;
+pub const ID_CODEC_PRIVATE: u32 = 0x63A2;
+pub const ID_VIDEO: u32 = 0xE0;
+pub const ID_PIXEL_WIDTH: u32 = 0xB0;
+pub const ID_PIXEL_HEIGHT: u32 = 0xBA;
+pub const ID_AUDIO: u32 = 0xE1;
+pub const ID_SAMPLING_FREQ: u32 = 0xB5;
+pub const ID_CHANNELS: u32 = 0x9F;
+
+pub const ID_CLUSTER: u32 = 0x1F43B675;
+pub const ID_TIMECODE: u32 = 0xE7;
+pub const ID_SIMPLE_BLOCK: u32 = 0xA3;
+pub const ID_BLOCK_GROUP: u32 = 0xA0;
+pub const ID_BLOCK: u32 = 0xA1;
+
+/// Minimal canonical byte length of an element ID (its marker is intrinsic).
+fn id_bytes(id: u32) -> Vec<u8> {
+    let len = match id {
+        0..=0xFF => 1,
+        0x100..=0xFFFF => 2,
+        0x1_0000..=0xFF_FFFF => 3,
+        _ => 4,
+    };
+    id.to_be_bytes()[4 - len..].to_vec()
+}
+
+/// `[id][size][payload]` for an element with the given raw payload.
+pub fn el(id: u32, payload: &[u8]) -> Vec<u8> {
+    let mut out = id_bytes(id);
+    out.extend(write_vint(payload.len() as u64));
+    out.extend_from_slice(payload);
+    out
+}
+
+/// An unsigned-integer element, big-endian, minimal length (>= 1 byte).
+pub fn uint(id: u32, value: u64) -> Vec<u8> {
+    let mut payload: Vec<u8> = value.to_be_bytes().into_iter().skip_while(|&b| b == 0).collect();
+    if payload.is_empty() {
+        payload.push(0);
+    }
+    el(id, &payload)
+}
+
+/// A UTF-8 string element.
+pub fn ebml_string(id: u32, s: &str) -> Vec<u8> {
+    el(id, s.as_bytes())
+}
+
+/// A binary element (e.g. `CodecPrivate`).
+pub fn binary(id: u32, data: &[u8]) -> Vec<u8> {
+    el(id, data)
+}
+
+/// A 32-bit IEEE-754 float element.
+pub fn float32(id: u32, value: f32) -> Vec<u8> {
+    el(id, &value.to_be_bytes())
 }
 
 /// Encode `value` as a minimal-length EBML data-size vint.
@@ -104,5 +212,45 @@ mod tests {
             let bytes = write_vint(v);
             assert_eq!(read_vint(&bytes, 0), Some((v, bytes.len())), "v={v}");
         }
+    }
+
+    #[test]
+    fn reads_element_header() {
+        // Info element (0x1549A966) with a 1-byte size of 5.
+        let buf = [0x15, 0x49, 0xA9, 0x66, 0x85, 1, 2, 3, 4, 5];
+        let e = read_element(&buf, 0).unwrap();
+        assert_eq!(e.id, ID_INFO);
+        assert_eq!(e.size, Some(5));
+        assert_eq!(e.header_len, 5);
+        assert_eq!(e.data_pos, 5);
+    }
+
+    #[test]
+    fn reads_unknown_size_element() {
+        // Segment (0x18538067) with the 1-byte unknown-size sentinel 0xFF.
+        let buf = [0x18, 0x53, 0x80, 0x67, 0xFF];
+        let e = read_element(&buf, 0).unwrap();
+        assert_eq!(e.id, ID_SEGMENT);
+        assert_eq!(e.size, None);
+        assert_eq!(e.data_pos, 5);
+    }
+
+    #[test]
+    fn builders_emit_canonical_bytes() {
+        // el(): CodecID "V_VP9" -> id 0x86, size 0x85, payload.
+        assert_eq!(el(ID_CODEC_ID, b"V_VP9"), vec![0x86, 0x85, b'V', b'_', b'V', b'P', b'9']);
+        // uint(): PixelWidth 1920 = 0x0780 -> id 0xB0, size 0x82, big-endian value.
+        assert_eq!(uint(ID_PIXEL_WIDTH, 1920), vec![0xB0, 0x82, 0x07, 0x80]);
+        // uint() of zero is one zero byte, not empty.
+        assert_eq!(uint(ID_CHANNELS, 0), vec![0x9F, 0x81, 0x00]);
+        // float32(): 48000.0 -> id 0xB5, size 0x84, IEEE-754 big-endian.
+        assert_eq!(
+            float32(ID_SAMPLING_FREQ, 48000.0),
+            {
+                let mut v = vec![0xB5, 0x84];
+                v.extend_from_slice(&48000.0f32.to_be_bytes());
+                v
+            }
+        );
     }
 }
