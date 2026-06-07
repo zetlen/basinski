@@ -84,7 +84,7 @@ pub fn sample_frames(
     let mut samples: BTreeMap<u64, Vec<(bool, Vec<u8>)>> = BTreeMap::new();
     let mut pos = first_cluster;
     let mut clusters_scanned = 0;
-    while pos < data.len() && clusters_scanned < 8 {
+    while pos < data.len() && clusters_scanned < SAMPLE_CLUSTERS {
         let Some(next) = walk_cluster(data, pos, |b| {
             let entry = samples.entry(b.track).or_default();
             if entry.len() < per_track {
@@ -165,16 +165,19 @@ fn find_first_cluster(data: &[u8]) -> Option<usize> {
     None
 }
 
-/// The block number of the first video track, if any.
+/// Clusters to scan when collecting per-track codec samples.
+const SAMPLE_CLUSTERS: usize = 8;
+/// Clusters to scan looking for the first keyframe-led cluster (GOP window).
+const KEYFRAME_SCAN_CLUSTERS: usize = 32;
+
+/// The block number of the first VP9 video track, if any.
+// Plan 1 reconstructs VP9 video only; find_keyframe_cluster detects VP9
+// keyframes. Plan 3 adds VP8/AV1/H264 here in tandem with their keyframe
+// detectors.
 fn video_track(tracks: &[Track]) -> Option<u64> {
     tracks
         .iter()
-        .find(|t| {
-            matches!(
-                t.codec,
-                Codec::Vp9 { .. } | Codec::Vp8 { .. } | Codec::Av1 { .. } | Codec::H264 { .. }
-            )
-        })
+        .find(|t| matches!(t.codec, Codec::Vp9 { .. }))
         .map(|t| t.number)
 }
 
@@ -188,15 +191,17 @@ fn find_keyframe_cluster(data: &[u8], start: usize, video_track: Option<u64>) ->
     };
     let mut pos = start;
     let mut scanned = 0;
-    while pos < data.len() && scanned < 32 {
+    while pos < data.len() && scanned < KEYFRAME_SCAN_CLUSTERS {
         let mut found_video = false;
         let mut is_keyframe = false;
-        let next = walk_cluster(data, pos, |b| {
+        let Some(next) = walk_cluster(data, pos, |b| {
             if b.track == vt && !found_video {
                 found_video = true;
                 is_keyframe = mkv_codecs::vp9_dims(&b.frame).is_some();
             }
-        })?;
+        }) else {
+            break;
+        };
         if found_video && is_keyframe {
             return Some(pos);
         }
@@ -311,6 +316,9 @@ pub fn build_head(tracks: &[Track], doctype: &str) -> Result<Vec<u8>> {
 /// first keyframe-led cluster for a clean start, or `first_cluster` for
 /// `--no-clip`).
 pub fn reconstruct(data: &[u8], h: &Heavy, start_offset: usize) -> Result<Vec<u8>> {
+    if start_offset > data.len() {
+        bail!("start_offset {start_offset} out of bounds for {}-byte buffer", data.len());
+    }
     let doctype = if all_webm_legal(&h.tracks) { "webm" } else { "matroska" };
     let mut out = build_head(&h.tracks, doctype)?;
     out.extend_from_slice(&data[start_offset..]);
@@ -442,6 +450,35 @@ mod tests {
         // The tail of the output is the surviving clusters, byte-for-byte.
         assert!(out.ends_with(&cluster));
         assert_eq!(&out[0..4], &[0x1A, 0x45, 0xDF, 0xA3]);
+    }
+
+    #[test]
+    fn analyze_picks_later_keyframe_led_cluster() {
+        // First cluster's video block is a VP9 INTER frame (0x86 = frame_type inter);
+        // the second cluster is led by a real VP9 keyframe. The clean playback start
+        // must be the second cluster.
+        let vp9_inter: &[u8] = &[0x86, 0x00, 0x40, 0x96, 0xA8];
+
+        let mut c1 = uint(ID_TIMECODE, 0);
+        c1.extend(simple_block(1, false, vp9_inter));
+        c1.extend(simple_block(2, true, &[0xFC, 0xEA]));
+        let c1 = el(ID_CLUSTER, &c1);
+
+        let mut c2 = uint(ID_TIMECODE, 100);
+        c2.extend(simple_block(1, true, VP9_KEYFRAME));
+        c2.extend(simple_block(2, true, &[0xFC, 0xEB]));
+        let c2 = el(ID_CLUSTER, &c2);
+
+        let mut buf = vec![0xAB; 8];
+        let c1_off = buf.len();
+        buf.extend_from_slice(&c1);
+        let c2_off = buf.len();
+        buf.extend_from_slice(&c2);
+
+        let Analysis::Heavy(h) = analyze(&buf) else { panic!("expected Heavy") };
+        assert_eq!(h.first_cluster, c1_off);
+        assert_eq!(h.first_keyframe_cluster, Some(c2_off));
+        assert_eq!(h.bytes_lost, c2_off);
     }
 
     fn window(haystack: &[u8], needle: &[u8]) -> Option<usize> {
