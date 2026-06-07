@@ -12,6 +12,7 @@ mod ffx;
 mod forensics;
 mod gestalt;
 mod h264;
+mod matroska;
 mod mkv_codecs;
 mod mp4;
 mod rescue;
