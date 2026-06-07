@@ -6,6 +6,9 @@
 // module is added.
 #![allow(dead_code)]
 
+use crate::ebml::{self, el, uint};
+use std::collections::BTreeSet;
+
 /// What a track's surviving frames revealed about its codec.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Codec {
@@ -19,9 +22,6 @@ pub enum Codec {
     /// identified at all — needs a `--reference` donor.
     NeedsDonor { hint: &'static str },
 }
-
-use crate::ebml::{self, el, uint};
-use std::collections::BTreeSet;
 
 /// Identify a track's codec from a sample of its frames. Each entry is
 /// `(is_keyframe, frame_bytes)`. Plan 1 recognizes VP9 (video) and Opus (audio);
@@ -85,7 +85,10 @@ pub fn track_entry(number: u64, codec: &Codec) -> Vec<u8> {
             .concat();
             body.extend(el(ebml::ID_AUDIO, &audio));
         }
-        other => panic!("track_entry called on a codec needing a donor: {other:?}"),
+        Codec::NeedsDonor { .. } => {
+            panic!("track_entry called on NeedsDonor — callers must route to a donor first")
+        }
+        other => panic!("track_entry: no synthesis arm yet for {other:?} (added in a later plan)"),
     }
     el(ebml::ID_TRACK_ENTRY, &body)
 }
@@ -261,6 +264,17 @@ mod tests {
         assert!(find(&bytes, b"A_OPUS").is_some());
         assert!(find(&bytes, b"OpusHead").is_some());
         assert!(find(&bytes, &crate::ebml::uint(crate::ebml::ID_TRACK_TYPE, 2)).is_some());
+    }
+
+    #[test]
+    fn sniff_identifies_opus_from_two_unflagged_frames() {
+        // Two non-keyframe frames sharing a constant TOC config still sniff as Opus
+        // via the `frames.len() >= 2` branch of the guard.
+        let frames = vec![
+            (false, vec![0xFC, 0x11, 0x22]),
+            (false, vec![0xFC, 0x33, 0x44]),
+        ];
+        assert_eq!(sniff(&frames), Codec::Opus { channels: 2 });
     }
 
     /// Tiny substring search for assertions.
