@@ -1,0 +1,23 @@
+[package]
+name = "basinski"
+version = "0.1.0"
+edition = "2024"
+description = "Rescues media files from their own disintegration. Named for William Basinski's Disintegration Loops."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/zetlen/basinski"
+homepage = "https://github.com/zetlen/basinski"
+readme = "README.md"
+keywords = ["ffmpeg", "mp4", "video", "recovery", "forensics"]
+categories = ["command-line-utilities", "multimedia::video"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+clap_complete = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The optional neural second opinion for `divine` (pure-Rust ONNX runtime).
+tract-onnx = "0.21"
+
+[profile.release]
+lto = true
