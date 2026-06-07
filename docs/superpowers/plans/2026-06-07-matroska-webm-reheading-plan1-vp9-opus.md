@@ -33,7 +33,7 @@
 
 - [ ] **Step 1: Declare the new modules in main.rs**
 
-In `src/main.rs`, the module block is at lines 8-16. Add three lines so the new files compile (alphabetical, matching existing style):
+In `src/main.rs`, the module block is at lines 8-16. Add **only** `mod ebml;` for now (alphabetical, matching existing style). The `mkv_codecs` and `matroska` declarations are added in Tasks 3 and 5, when those files are created — declaring a `mod` for a file that doesn't exist yet would break the build.
 
 ```rust
 mod aac;
@@ -43,8 +43,6 @@ mod ffx;
 mod forensics;
 mod gestalt;
 mod h264;
-mod matroska;
-mod mkv_codecs;
 mod mp4;
 mod rescue;
 mod transplant;
@@ -387,6 +385,11 @@ git commit -m "feat(ebml): element header reader, ID constants, and builders"
 
 **Files:**
 - Create: `src/mkv_codecs.rs`
+- Modify: `src/main.rs` (add `mod mkv_codecs;`)
+
+- [ ] **Step 0: Declare the module**
+
+In `src/main.rs`, add `mod mkv_codecs;` to the module block (alphabetical: after `mod h264;`, before `mod mp4;`). Without this, `cargo test` won't compile the new file.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -735,6 +738,11 @@ git commit -m "feat(mkv_codecs): codec sniffing and TrackEntry synthesis"
 
 **Files:**
 - Create: `src/matroska.rs`
+- Modify: `src/main.rs` (add `mod matroska;`)
+
+- [ ] **Step 0: Declare the module**
+
+In `src/main.rs`, add `mod matroska;` to the module block (alphabetical: after `mod h264;`/`mod mkv_codecs;` ordering — place it after `mod h264;` and before `mod mkv_codecs;`). Without this, `cargo test` won't compile the new file.
 
 - [ ] **Step 1: Write the failing tests**
 
