@@ -2,6 +2,9 @@
 //! Codec identification and per-codec Matroska head synthesis for the
 //! reconstructive (Tier 2) re-head. WebM-native codecs (VP8/VP9/AV1/Opus) are
 //! parsed here; H.264-in-Matroska delegates to `h264.rs`/`divine.rs` (Plan 3).
+// Items are consumed by matroska (Task 5); suppress dead-code lint until that
+// module is added.
+#![allow(dead_code)]
 
 /// What a track's surviving frames revealed about its codec.
 #[derive(Debug, Clone, PartialEq)]
@@ -15,6 +18,76 @@ pub enum Codec {
     /// frames (Vorbis codebooks, AAC AudioSpecificConfig) or could not be
     /// identified at all — needs a `--reference` donor.
     NeedsDonor { hint: &'static str },
+}
+
+use crate::ebml::{self, el, uint};
+use std::collections::BTreeSet;
+
+/// Identify a track's codec from a sample of its frames. Each entry is
+/// `(is_keyframe, frame_bytes)`. Plan 1 recognizes VP9 (video) and Opus (audio);
+/// anything else returns `NeedsDonor`.
+pub fn sniff(frames: &[(bool, Vec<u8>)]) -> Codec {
+    // Video: a VP9 keyframe carries its own geometry. Try flagged keyframes
+    // first, then any frame (Matroska keyframe flags can be unreliable).
+    for &(key, ref f) in frames {
+        if key && let Some((w, h)) = vp9_dims(f) {
+            return Codec::Vp9 { width: w, height: h };
+        }
+    }
+    for (_key, f) in frames {
+        if let Some((w, h)) = vp9_dims(f) {
+            return Codec::Vp9 { width: w, height: h };
+        }
+    }
+    // Audio: Opus packets share a constant TOC config (top 5 bits) across a clip.
+    // Require at least 2 frames or a keyframe-flagged frame to avoid misidentifying
+    // a single unrecognized blob as Opus.
+    let has_keyframe = frames.iter().any(|(k, _)| *k);
+    let configs: BTreeSet<u8> = frames
+        .iter()
+        .filter_map(|(_, f)| f.first().map(|b| b >> 3))
+        .collect();
+    if configs.len() == 1
+        && (frames.len() >= 2 || has_keyframe)
+        && let Some((_, f0)) = frames.first()
+        && let Some(&toc) = f0.first()
+    {
+        return Codec::Opus { channels: opus_channels(toc) };
+    }
+    Codec::NeedsDonor { hint: "unrecognized codec (Plan 1 handles VP9 + Opus)" }
+}
+
+/// Build a `TrackEntry` element for a sniffed codec. Panics on `NeedsDonor`
+/// (callers must check and route to a donor before synthesizing a head).
+pub fn track_entry(number: u64, codec: &Codec) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend(uint(ebml::ID_TRACK_NUMBER, number));
+    body.extend(uint(ebml::ID_TRACK_UID, number));
+    match codec {
+        Codec::Vp9 { width, height } => {
+            body.extend(uint(ebml::ID_TRACK_TYPE, 1)); // video
+            body.extend(ebml::ebml_string(ebml::ID_CODEC_ID, "V_VP9"));
+            let video = [
+                uint(ebml::ID_PIXEL_WIDTH, *width as u64),
+                uint(ebml::ID_PIXEL_HEIGHT, *height as u64),
+            ]
+            .concat();
+            body.extend(el(ebml::ID_VIDEO, &video));
+        }
+        Codec::Opus { channels } => {
+            body.extend(uint(ebml::ID_TRACK_TYPE, 2)); // audio
+            body.extend(ebml::ebml_string(ebml::ID_CODEC_ID, "A_OPUS"));
+            body.extend(ebml::binary(ebml::ID_CODEC_PRIVATE, &opus_head(*channels)));
+            let audio = [
+                ebml::float32(ebml::ID_SAMPLING_FREQ, 48000.0),
+                uint(ebml::ID_CHANNELS, *channels as u64),
+            ]
+            .concat();
+            body.extend(el(ebml::ID_AUDIO, &audio));
+        }
+        other => panic!("track_entry called on a codec needing a donor: {other:?}"),
+    }
+    el(ebml::ID_TRACK_ENTRY, &body)
 }
 
 /// Big-endian MSB-first bit reader over a byte slice. Reads past the end yield 0.
@@ -148,5 +221,50 @@ mod tests {
         assert_eq!(h[9], 2); // channel count
         assert_eq!(&h[12..16], &48000u32.to_le_bytes()); // input sample rate
         assert_eq!(h[18], 0); // channel mapping family
+    }
+
+    #[test]
+    fn sniff_identifies_vp9_from_keyframe() {
+        let frames = vec![(true, VP9_KEYFRAME.to_vec())];
+        assert_eq!(sniff(&frames), Codec::Vp9 { width: 1920, height: 1080 });
+    }
+
+    #[test]
+    fn sniff_identifies_opus_from_consistent_toc() {
+        // Audio frames with a constant TOC config (top 5 bits) -> Opus.
+        let frames = vec![
+            (true, vec![0xFC, 0xEA, 0x73]),
+            (true, vec![0xFC, 0x13, 0xFE]),
+            (true, vec![0xFC, 0x01, 0x0A]),
+        ];
+        assert_eq!(sniff(&frames), Codec::Opus { channels: 2 });
+    }
+
+    #[test]
+    fn sniff_unknown_needs_donor() {
+        let frames = vec![(false, vec![0xDE, 0xAD, 0xBE, 0xEF])];
+        assert!(matches!(sniff(&frames), Codec::NeedsDonor { .. }));
+    }
+
+    #[test]
+    fn track_entry_for_vp9_has_codec_id_and_dims() {
+        let bytes = track_entry(1, &Codec::Vp9 { width: 1920, height: 1080 });
+        // Contains the CodecID string and a TrackType=1 (video).
+        assert!(find(&bytes, b"V_VP9").is_some());
+        assert!(find(&bytes, &crate::ebml::uint(crate::ebml::ID_PIXEL_WIDTH, 1920)).is_some());
+        assert!(find(&bytes, &crate::ebml::uint(crate::ebml::ID_TRACK_TYPE, 1)).is_some());
+    }
+
+    #[test]
+    fn track_entry_for_opus_has_opus_head() {
+        let bytes = track_entry(2, &Codec::Opus { channels: 2 });
+        assert!(find(&bytes, b"A_OPUS").is_some());
+        assert!(find(&bytes, b"OpusHead").is_some());
+        assert!(find(&bytes, &crate::ebml::uint(crate::ebml::ID_TRACK_TYPE, 2)).is_some());
+    }
+
+    /// Tiny substring search for assertions.
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
     }
 }
