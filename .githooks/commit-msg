@@ -1,0 +1,30 @@
+#!/bin/sh
+# Conventional Commits check for local commits.
+# Enable once per clone:  git config core.hooksPath .githooks
+#
+# This is a convenience for contributors. The enforced gate is the PR-title
+# check in CI (.github/workflows/pr-title.yml), because the repo squash-merges
+# and the PR title becomes the commit on main.
+
+header=$(head -n1 "$1")
+
+# Let git's own machinery through untouched.
+case "$header" in
+	"Merge "* | "Revert "* | "fixup!"* | "squash!"* | "amend!"*) exit 0 ;;
+esac
+
+pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9 _-]+\))?!?: .+'
+
+if printf '%s' "$header" | grep -Eq "$pattern"; then
+	exit 0
+fi
+
+cat >&2 <<'EOF'
+✗ Commit message is not a Conventional Commit.
+
+  Format:  <type>[optional scope][!]: <description>
+  Types:   feat fix docs style refactor perf test build ci chore revert
+  Example: feat(rescue): recover interlaced H.264 streams
+
+EOF
+exit 1

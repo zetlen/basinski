@@ -1,0 +1,63 @@
+name: release-plz
+
+# On every push to main, release-plz keeps an open "release PR" up to date
+# (version bump + CHANGELOG from Conventional Commits). When that PR is merged,
+# the release job publishes to crates.io and creates the GitHub release + tag —
+# which in turn triggers release.yml to build and attach binaries.
+#
+# RELEASE_PLZ_TOKEN must be a PAT (or GitHub App token): a release PR opened
+# with the default GITHUB_TOKEN does not trigger CI, so under branch protection
+# its required checks never run and it can't be merged. The PAT also lets the
+# created release trigger the binary build in release.yml.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # Publishes to crates.io + creates the GitHub release when a version bump
+  # (a merged release PR) lands on main.
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Opens/updates the release PR with the pending version bump and changelog.
+  release-pr:
+    name: release-pr
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    # Avoid racing the release job over the same git state.
+    concurrency:
+      group: release-plz-pr
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

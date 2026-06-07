@@ -1,0 +1,12 @@
+[workspace]
+# The release PR is merged via squash, so its title becomes a commit on main and
+# must satisfy the Conventional-Commit PR-title gate. Pin it deterministically
+# rather than relying on the default (a non-conventional title would block the
+# release PR from ever merging under branch protection).
+pr_name = "chore: release"
+
+# Keep a conventional, changelog-driven release. (These match release-plz
+# defaults; stated explicitly so the behavior is obvious.)
+changelog_update = true
+git_release_enable = true
+git_tag_enable = true
