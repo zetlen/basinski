@@ -4,7 +4,9 @@
 set -euo pipefail
 
 BIN=${BIN:-target/release/basinski}
-DIR=$(mktemp -d -t basinski-e2e)
+# Portable across BSD (macOS) and GNU (Linux/CI) mktemp: a full template with
+# trailing X's works on both; `-t <prefix>` does not (GNU needs the X's).
+DIR=$(mktemp -d "${TMPDIR:-/tmp}/basinski-e2e.XXXXXX")
 trap 'rm -rf "$DIR"' EXIT
 cd "$DIR"
 

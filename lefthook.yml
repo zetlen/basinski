@@ -1,0 +1,22 @@
+# Git hooks, managed by lefthook (https://lefthook.dev).
+#
+#   Install the binary:  brew install lefthook   (or: cargo binstall lefthook,
+#                        go install, npm i -g lefthook, prebuilt binary, ...)
+#   Activate per clone:  lefthook install
+#
+# This is a fast LOCAL mirror of the enforced gate. The actual enforcement is
+# server-side: the `pr-title` workflow validates the PR title, and since the repo
+# squash-merges, that title becomes the commit on `main`.
+
+commit-msg:
+  commands:
+    conventional:
+      # {1} is the path to the commit message file (the git commit-msg argument).
+      # Allow merge/revert/fixup machinery; otherwise require Conventional Commits.
+      run: |
+        head -n1 {1} | grep -qE '^((Merge|Revert) |(fixup|squash|amend)!|(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9 _-]+\))?!?: .+)' || {
+          echo "✗ Not a Conventional Commit: <type>[scope][!]: <description>" >&2
+          echo "  types: feat fix docs style refactor perf test build ci chore revert" >&2
+          echo "  e.g.: feat(rescue): recover interlaced H.264 streams" >&2
+          exit 1
+        }
