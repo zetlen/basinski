@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 
+use anyhow::{bail, Result};
+
 use crate::ebml::{self, read_element};
 use crate::mkv_codecs::{self, Codec};
 
@@ -236,6 +238,85 @@ pub fn analyze(data: &[u8]) -> Analysis {
     })
 }
 
+/// True if every track's codec is legal in a `.webm` (so we pick DocType "webm";
+/// otherwise "matroska"). Plan 1 only ever produces VP9/Opus, but this keeps the
+/// DocType honest as codecs are added.
+pub fn all_webm_legal(tracks: &[Track]) -> bool {
+    tracks.iter().all(|t| {
+        matches!(
+            t.codec,
+            Codec::Vp9 { .. } | Codec::Vp8 { .. } | Codec::Av1 { .. } | Codec::Opus { .. }
+        )
+    })
+}
+
+/// Synthesize the container head: EBML header + Segment(unknown size) + Info +
+/// Tracks. Errors if any track still needs a donor.
+pub fn build_head(tracks: &[Track], doctype: &str) -> Result<Vec<u8>> {
+    for t in tracks {
+        if let Codec::NeedsDonor { hint } = &t.codec {
+            bail!("track {} cannot be re-headed without a donor ({hint})", t.number);
+        }
+    }
+
+    let ebml_hdr = ebml::el(
+        ebml::ID_EBML,
+        &[
+            ebml::uint(ebml::ID_EBML_VERSION, 1),
+            ebml::uint(ebml::ID_EBML_READ_VERSION, 1),
+            ebml::uint(ebml::ID_EBML_MAX_ID_LEN, 4),
+            ebml::uint(ebml::ID_EBML_MAX_SIZE_LEN, 8),
+            ebml::ebml_string(ebml::ID_DOCTYPE, doctype),
+            ebml::uint(ebml::ID_DOCTYPE_VERSION, 2),
+            ebml::uint(ebml::ID_DOCTYPE_READ_VERSION, 2),
+        ]
+        .concat(),
+    );
+
+    let info = ebml::el(
+        ebml::ID_INFO,
+        &[
+            ebml::uint(ebml::ID_TIMECODE_SCALE, 1_000_000),
+            ebml::ebml_string(ebml::ID_MUXING_APP, "basinski"),
+            ebml::ebml_string(ebml::ID_WRITING_APP, "basinski"),
+        ]
+        .concat(),
+    );
+
+    let mut track_elements = Vec::new();
+    for t in tracks {
+        track_elements.extend(mkv_codecs::track_entry(t.number, &t.codec));
+    }
+    let tracks_el = ebml::el(ebml::ID_TRACKS, &track_elements);
+
+    // Segment with the 8-byte unknown-size sentinel: ffmpeg reads children until
+    // EOF, which is what we want (we don't know the post-clip length yet).
+    let segment_open = {
+        let mut v = ebml::el(ebml::ID_SEGMENT, &[]); // produces [id][0x80]
+        v.truncate(v.len() - 1); // drop the 0-length size byte
+        v.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        v
+    };
+
+    let mut head = ebml_hdr;
+    head.extend(segment_open);
+    head.extend(info);
+    head.extend(tracks_el);
+    Ok(head)
+}
+
+/// Full reconstructed file bytes: synthesized head followed by the surviving
+/// clusters from `start_offset` to EOF, copied verbatim. Pure — no ffmpeg, no
+/// filesystem. `start_offset` is a cluster boundary chosen by the caller (the
+/// first keyframe-led cluster for a clean start, or `first_cluster` for
+/// `--no-clip`).
+pub fn reconstruct(data: &[u8], h: &Heavy, start_offset: usize) -> Result<Vec<u8>> {
+    let doctype = if all_webm_legal(&h.tracks) { "webm" } else { "matroska" };
+    let mut out = build_head(&h.tracks, doctype)?;
+    out.extend_from_slice(&data[start_offset..]);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +399,52 @@ mod tests {
         assert_eq!(h.tracks[0].codec, Codec::Vp9 { width: 1920, height: 1080 });
         assert_eq!(h.tracks[1].number, 2);
         assert_eq!(h.tracks[1].codec, Codec::Opus { channels: 2 });
+    }
+
+    #[test]
+    fn build_head_emits_ebml_and_tracks() {
+        let tracks = vec![
+            Track { number: 1, codec: Codec::Vp9 { width: 1920, height: 1080 } },
+            Track { number: 2, codec: Codec::Opus { channels: 2 } },
+        ];
+        let head = build_head(&tracks, "webm").unwrap();
+        // Starts with EBML magic.
+        assert_eq!(&head[0..4], &[0x1A, 0x45, 0xDF, 0xA3]);
+        // Declares DocType webm and both codecs.
+        assert!(window(&head, b"webm").is_some());
+        assert!(window(&head, b"V_VP9").is_some());
+        assert!(window(&head, b"A_OPUS").is_some());
+        // Contains a Segment ID and a Tracks ID.
+        assert!(window(&head, &[0x18, 0x53, 0x80, 0x67]).is_some());
+        assert!(window(&head, &[0x16, 0x54, 0xAE, 0x6B]).is_some());
+    }
+
+    #[test]
+    fn build_head_refuses_donor_only_track() {
+        let tracks = vec![Track {
+            number: 1,
+            codec: Codec::NeedsDonor { hint: "x" },
+        }];
+        assert!(build_head(&tracks, "webm").is_err());
+    }
+
+    #[test]
+    fn reconstruct_prepends_head_and_copies_clusters_verbatim() {
+        let mut body = uint(ID_TIMECODE, 0);
+        body.extend(simple_block(1, true, VP9_KEYFRAME));
+        body.extend(simple_block(2, true, &[0xFC, 0xEA]));
+        let cluster = el(ID_CLUSTER, &body);
+        let mut buf = vec![0xAB; 8];
+        buf.extend_from_slice(&cluster);
+
+        let Analysis::Heavy(h) = analyze(&buf) else { panic!() };
+        let out = reconstruct(&buf, &h, h.first_cluster).unwrap();
+        // The tail of the output is the surviving clusters, byte-for-byte.
+        assert!(out.ends_with(&cluster));
+        assert_eq!(&out[0..4], &[0x1A, 0x45, 0xDF, 0xA3]);
+    }
+
+    fn window(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
     }
 }
