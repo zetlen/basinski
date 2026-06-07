@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use crate::ebml::{self, read_element};
+use crate::mkv_codecs::{self, Codec};
 
 /// One sampled block: which track, whether flagged a keyframe, and the first
 /// (un-laced) frame's bytes.
@@ -99,6 +100,142 @@ pub fn sample_frames(
     samples
 }
 
+/// One reconstructed track: its block number and sniffed codec.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Track {
+    pub number: u64,
+    pub codec: Codec,
+}
+
+/// A heavy beheading: the head is gone, but clusters survive from `first_cluster`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Heavy {
+    /// Offset of the first verified surviving cluster.
+    pub first_cluster: usize,
+    /// Offset of the first cluster led by a true video keyframe — the clean
+    /// playback start. `None` if no keyframe-led cluster was found in the scan
+    /// window (then playback must start mid-GOP and may show leading artifacts).
+    pub first_keyframe_cluster: Option<usize>,
+    pub tracks: Vec<Track>,
+    /// Bytes discarded before the chosen playback start.
+    pub bytes_lost: usize,
+}
+
+/// What `analyze` concluded about a buffer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Analysis {
+    /// Valid EBML magic at offset 0 — not a beheading; leave it to ffmpeg.
+    Intact,
+    /// Only clusters survive; the `Tracks` element must be reconstructed.
+    Heavy(Heavy),
+    /// No usable Matroska structure found.
+    NoStructure,
+}
+
+/// True if `pos` begins a cluster whose first child is a plausible Timecode or
+/// block — guards against the 4-byte cluster ID appearing inside frame data.
+fn validate_cluster(data: &[u8], pos: usize) -> bool {
+    let Some(cluster) = read_element(data, pos) else {
+        return false;
+    };
+    if cluster.id != ebml::ID_CLUSTER {
+        return false;
+    }
+    match read_element(data, cluster.data_pos) {
+        Some(child) => matches!(
+            child.id,
+            ebml::ID_TIMECODE | ebml::ID_SIMPLE_BLOCK | ebml::ID_BLOCK_GROUP
+        ),
+        None => false,
+    }
+}
+
+/// Find the first offset that begins a verified cluster.
+fn find_first_cluster(data: &[u8]) -> Option<usize> {
+    const SIG: [u8; 4] = [0x1F, 0x43, 0xB6, 0x75];
+    let mut i = 0;
+    while i + 4 <= data.len() {
+        if data[i..i + 4] == SIG && validate_cluster(data, i) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The block number of the first video track, if any.
+fn video_track(tracks: &[Track]) -> Option<u64> {
+    tracks
+        .iter()
+        .find(|t| {
+            matches!(
+                t.codec,
+                Codec::Vp9 { .. } | Codec::Vp8 { .. } | Codec::Av1 { .. } | Codec::H264 { .. }
+            )
+        })
+        .map(|t| t.number)
+}
+
+/// First cluster (at/after `start`) whose first `video_track` block is a true
+/// keyframe — the clean playback start. With no video track, audio frames are
+/// all keyframes, so `start` itself is clean. Plan 1 detects keyframes via the
+/// VP9 header; Plan 3 generalizes this per codec.
+fn find_keyframe_cluster(data: &[u8], start: usize, video_track: Option<u64>) -> Option<usize> {
+    let Some(vt) = video_track else {
+        return Some(start);
+    };
+    let mut pos = start;
+    let mut scanned = 0;
+    while pos < data.len() && scanned < 32 {
+        let mut found_video = false;
+        let mut is_keyframe = false;
+        let next = walk_cluster(data, pos, |b| {
+            if b.track == vt && !found_video {
+                found_video = true;
+                is_keyframe = mkv_codecs::vp9_dims(&b.frame).is_some();
+            }
+        })?;
+        if found_video && is_keyframe {
+            return Some(pos);
+        }
+        scanned += 1;
+        if next <= pos {
+            break;
+        }
+        pos = next;
+    }
+    None
+}
+
+/// Diagnose a buffer that `mp4::analyze` could not place (no moov).
+pub fn analyze(data: &[u8]) -> Analysis {
+    if data.len() >= 4 && data[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        return Analysis::Intact;
+    }
+    let Some(first) = find_first_cluster(data) else {
+        return Analysis::NoStructure;
+    };
+    let samples = sample_frames(data, first, 6);
+    if samples.is_empty() {
+        return Analysis::NoStructure;
+    }
+    let tracks: Vec<Track> = samples
+        .into_iter()
+        .map(|(number, frames)| Track {
+            number,
+            codec: mkv_codecs::sniff(&frames),
+        })
+        .collect();
+    let first_keyframe_cluster = find_keyframe_cluster(data, first, video_track(&tracks));
+    let bytes_lost = first_keyframe_cluster.unwrap_or(first);
+    Analysis::Heavy(Heavy {
+        first_cluster: first,
+        first_keyframe_cluster,
+        tracks,
+        bytes_lost,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +276,47 @@ mod tests {
         let s = sample_frames(&cluster, 0, 4);
         assert_eq!(s.len(), 1);
         assert_eq!(s[&1], vec![(true, b"K".to_vec()), (false, b"P".to_vec())]);
+    }
+
+    const VP9_KEYFRAME: &[u8] = &[
+        0x82, 0x49, 0x83, 0x42, 0x40, 0x77, 0xF0, 0x43, 0x74, 0x18, 0x27, 0xA0,
+    ];
+
+    #[test]
+    fn analyze_reports_intact_for_ebml_magic() {
+        let buf = [0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x02];
+        assert!(matches!(analyze(&buf), Analysis::Intact));
+    }
+
+    #[test]
+    fn analyze_reports_nostructure_for_garbage() {
+        let buf = [0u8; 64];
+        assert!(matches!(analyze(&buf), Analysis::NoStructure));
+    }
+
+    #[test]
+    fn analyze_finds_heavy_beheading_with_vp9_and_opus() {
+        // [8 bytes garbage][cluster: VP9 keyframe on track 1, Opus frame on track 2]
+        let mut body = uint(ID_TIMECODE, 0);
+        body.extend(simple_block(1, true, VP9_KEYFRAME));
+        body.extend(simple_block(2, true, &[0xFC, 0xEA, 0x73]));
+        let cluster = el(ID_CLUSTER, &body);
+
+        let mut buf = vec![0xAB; 8];
+        let cluster_off = buf.len();
+        buf.extend_from_slice(&cluster);
+
+        let Analysis::Heavy(h) = analyze(&buf) else {
+            panic!("expected Heavy");
+        };
+        assert_eq!(h.first_cluster, cluster_off);
+        // The single cluster is led by a real VP9 keyframe, so it is also the
+        // clean playback start.
+        assert_eq!(h.first_keyframe_cluster, Some(cluster_off));
+        assert_eq!(h.tracks.len(), 2);
+        assert_eq!(h.tracks[0].number, 1);
+        assert_eq!(h.tracks[0].codec, Codec::Vp9 { width: 1920, height: 1080 });
+        assert_eq!(h.tracks[1].number, 2);
+        assert_eq!(h.tracks[1].codec, Codec::Opus { channels: 2 });
     }
 }
