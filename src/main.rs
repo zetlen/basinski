@@ -7,6 +7,7 @@
 
 mod aac;
 mod divine;
+mod ebml;
 mod ffx;
 mod forensics;
 mod gestalt;
