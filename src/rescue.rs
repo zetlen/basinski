@@ -15,6 +15,8 @@ use anyhow::{Context, Result, bail};
 use crate::ffx;
 use crate::forensics::{self, Finding};
 use crate::mp4::{self, Analysis};
+use crate::matroska;
+use crate::mkv_codecs::Codec;
 use crate::transplant;
 
 pub struct Options {
@@ -69,7 +71,12 @@ pub fn rescue(input: &Path, output: Option<PathBuf>, opts: &Options) -> Result<(
             let out = output.unwrap_or_else(|| default_output(input, "rescued", "mp4"));
             rescue_intact(input, &out, opts)
         }
-        Analysis::NoMoov => rescue_headerless_stream(input, output, &data, &findings, opts),
+        Analysis::NoMoov => match matroska::analyze(&data) {
+            matroska::Analysis::Heavy(h) => rescue_matroska(input, output, &data, h, opts),
+            // Intact Matroska / no structure: let the headerless path probe it
+            // (ffprobe reads intact Matroska; truly unknown data falls through).
+            _ => rescue_headerless_stream(input, output, &data, &findings, opts),
+        },
     }
 }
 
@@ -165,6 +172,91 @@ fn rescue_head_truncated_mp4(
     }
 
     finish(input, output, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Reconstructive: heavily-beheaded Matroska/WebM (only clusters survive)
+// ---------------------------------------------------------------------------
+
+fn rescue_matroska(
+    input: &Path,
+    output: Option<PathBuf>,
+    data: &[u8],
+    h: matroska::Heavy,
+    opts: &Options,
+) -> Result<()> {
+    println!("\n  diagnosis: beheaded Matroska/WebM — only clusters survived");
+    println!(
+        "    bytes lost before first clean cluster : {} (~head + first cluster)",
+        h.bytes_lost
+    );
+    for t in &h.tracks {
+        println!("    track {}: {:?}", t.number, t.codec);
+    }
+
+    // Honest failure: a track whose parameters lived in the lost header and
+    // cannot be synthesized from frames. Transplant (donor) arrives in Plan 2.
+    for t in &h.tracks {
+        if let Codec::NeedsDonor { hint } = t.codec {
+            bail!(
+                "track {} ({hint}) keeps its parameters in the lost Tracks header.\n\
+                 basinski can't synthesize them from the frames alone. A donor-based\n\
+                 transplant (--reference <sibling from the same encoder>) is the next\n\
+                 rung, but is not yet implemented for Matroska.",
+                t.number
+            );
+        }
+    }
+
+    let webm = matroska::all_webm_legal(&h.tracks);
+    let ext = if webm { "webm" } else { "mkv" };
+    let out = output.unwrap_or_else(|| default_output(input, "rescued", ext));
+
+    // Choose the playback start at the container level: the first cluster led by
+    // a true keyframe gives clean playback from frame one (no ffmpeg clip).
+    // --no-clip keeps everything from the first surviving cluster instead.
+    let start = if opts.no_clip {
+        h.first_cluster
+    } else {
+        h.first_keyframe_cluster.unwrap_or(h.first_cluster)
+    };
+    if opts.no_clip {
+        println!("  (--no-clip: starting at first surviving cluster; leading mid-GOP frames may artifact)");
+    } else if h.first_keyframe_cluster.is_none() {
+        println!("  ⚠ no keyframe-led cluster found in scan window — starting mid-GOP, expect leading artifacts");
+    } else if start > h.first_cluster {
+        println!("  ✂ starting at first keyframe-led cluster (offset {start})");
+    }
+
+    let rebuilt = matroska::reconstruct(data, &h, start)?;
+    let head_len = rebuilt.len() - (data.len() - start);
+    let temp = out.with_extension(format!("rehead.{ext}"));
+    fs::write(&temp, &rebuilt).with_context(|| format!("writing {}", temp.display()))?;
+    println!(
+        "\n  ☼ synthesized {head_len}-byte head (EBML + Segment + Info + Tracks) → {}",
+        temp.display()
+    );
+
+    let probe = ffx::probe(&temp)?
+        .context("reconstruction produced a file ffprobe cannot read — head may be wrong")?;
+    println!("  container restored: {}", probe.summary());
+
+    // Stream-copy remux: ffmpeg's own muxer rewrites the blocks cleanly and
+    // launders the benign VP9 parser chatter, yielding a pristine container.
+    ffx::remux_copy(&temp, &out)?;
+
+    // Validate the reconstruction against the decoder (the basinski contract).
+    let errs = ffx::decode_errors(&out).unwrap_or(0);
+    if errs == 0 {
+        println!("  ✓ decodes clean (0 errors)");
+    } else {
+        println!("  ⚠ {errs} decode error line(s) remain — inspect the output");
+    }
+
+    if !opts.keep_temp {
+        let _ = fs::remove_file(&temp);
+    }
+    finish(input, &out, opts)
 }
 
 // ---------------------------------------------------------------------------
