@@ -104,3 +104,24 @@ The README's mermaid flowchart is the canonical decision tree.
   limitations" for the contract.
 - `samples/` is gitignored, machine-local casework. `samples/NOTES.md` is the
   running lab notebook for real-file rescues (also tracked in auto-memory).
+
+## Contributing, CI & releases
+
+- **`main` is protected: no direct pushes** (enforced for admins too). All
+  changes land via PR, **squash-merged**. The squash commit takes the PR title,
+  so **PR titles must be Conventional Commits** (`feat:`, `fix:`, `ci:`, …) —
+  enforced by the `pr-title` workflow, which is a required check.
+- **Conventional commits locally**: hooks are managed by
+  [lefthook](https://lefthook.dev) (`lefthook.yml`). Run `lefthook install` once
+  per clone (`brew install lefthook` first); a `commit-msg` hook mirrors the
+  PR-title gate. It's a convenience — the server-side check is the real gate.
+- **CI** (`.github/workflows/ci.yml`): `fmt --check`, `clippy -D warnings`, and
+  `cargo test` are the required checks; an `e2e` job (installs ffmpeg, runs
+  `tests/e2e.sh`) runs but is intentionally non-required (the brute-force
+  `divine` step has some variance).
+- **Releases are automated by [release-plz](https://release-plz.dev)**: merging
+  conventional commits to `main` keeps a release PR open (version bump +
+  changelog); merging *that* publishes to crates.io and cuts a GitHub release,
+  which triggers `release.yml` to build the 5-target binary matrix and attach
+  `basinski-<target>.{tar.gz,zip}` assets (the naming `ubi`/`mise` expect).
+  Requires the `CARGO_REGISTRY_TOKEN` and `RELEASE_PLZ_TOKEN` repo secrets.
