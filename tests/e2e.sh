@@ -95,4 +95,44 @@ echo "    clean rescue : $frames_clean/$frames_orig frames, decoded bit-identica
 echo "    deep rescue  : ${dur}s of 6s recovered, 0 decode errors"
 echo "    transplant   : $frames_tx/$frames_orig frames from a 60% tail cut, 0 decode errors"
 echo "    divine       : $frames_div frames at $res_div from a bare payload, no donor, 0 decode errors"
+
+# --- Matroska/WebM reconstructive re-head (VP9 + Opus, heavy beheading) ---
+if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libvpx-vp9 \
+   && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libopus; then
+
+  echo "==> WebM: synthesizing 6s VP9+Opus fixture"
+  ffmpeg -v error -y \
+    -f lavfi -i "testsrc2=size=640x360:rate=30:duration=6" \
+    -f lavfi -i "sine=frequency=440:duration=6" \
+    -c:v libvpx-vp9 -b:v 600k -g 24 -c:a libopus -b:a 64k \
+    "$DIR/src.webm"
+
+  echo "==> WebM: beheading (drop everything before the 2nd Cluster; Tracks element gone)"
+  python3 - "$DIR/src.webm" "$DIR/beheaded.webm" <<'PY'
+import sys
+data = open(sys.argv[1], "rb").read()
+sig = bytes.fromhex("1F43B675")
+first = data.find(sig)
+second = data.find(sig, first + 1)
+cut = second if second != -1 else first
+open(sys.argv[2], "wb").write(data[cut:])
+PY
+
+  echo "==> WebM: rescue beheaded.webm -> rescued.webm"
+  "$BIN" rescue "$DIR/beheaded.webm" -o "$DIR/rescued.webm"
+
+  echo "==> WebM: verifying codec streams and decode quality"
+  probe=$(ffprobe -v error -show_entries stream=codec_name -of csv=p=0 "$DIR/rescued.webm" | tr '\n' ',')
+  echo "$probe" | grep -q vp9  || { echo "FAIL: no vp9 stream in rescued.webm (got: $probe)" >&2; exit 1; }
+  echo "$probe" | grep -q opus || { echo "FAIL: no opus stream in rescued.webm (got: $probe)" >&2; exit 1; }
+  webm_errs=$(ffmpeg -v error -i "$DIR/rescued.webm" -f null - 2>&1 | wc -l | tr -d ' ')
+  [ "$webm_errs" = "0" ] || { echo "FAIL: rescued.webm has $webm_errs decode error lines" >&2; exit 1; }
+
+  echo "    WebM VP9+Opus: reconstructive re-head, 0 decode errors"
+  echo "PASS: WebM VP9/Opus reconstructive re-head"
+
+else
+  echo "skip: WebM reconstructive case needs libvpx-vp9 + libopus (not found)"
+fi
+
 echo "PASS"
