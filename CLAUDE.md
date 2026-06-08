@@ -78,10 +78,22 @@ off to module entry points. Modules form a dependency stack from raw bytes up:
 - **`aac.rs`** — raw-AAC audio salvage from the gaps *between* video samples,
   used by the transplant/rescue path. Recognizes the recurring CPE element
   header, wraps each gap in a synthetic ADTS header, lets the decoder walk it.
+- **`ebml.rs`** — EBML primitives (vint/element read+write, ID constants, head
+  builders); the Matroska analog of the byte helpers in `forensics`/`mp4`.
+- **`mkv_codecs.rs`** — codec sniff + per-codec Matroska head synthesis (VP9
+  geometry from the keyframe header, Opus `OpusHead` from the TOC byte);
+  H.264-in-MKV will delegate to `h264.rs`.
+- **`matroska.rs`** — Matroska/WebM analysis + reconstructive re-head: walk
+  surviving clusters, sniff codecs, synthesize `EBML`+`Segment`+`Info`+`Tracks`,
+  copy clusters verbatim (never decodes); the analog of `mp4.rs`+`transplant.rs`
+  for EBML containers.
 - **`rescue.rs`** — the orchestrator. Diagnoses the damage from forensics, routes
   to surgical (`mp4`) vs transplant (`transplant`) vs empirical (trim-to-sync)
   recovery, salvages audio (`aac`), validates the decode, and clips to the first
-  clean keyframe. This is where the subcommand flags become a pipeline.
+  clean keyframe. Also routes beheaded Matroska/WebM (only clusters survive) to
+  a reconstructive re-head via `matroska`; currently supports VP9+Opus without a
+  donor (Vorbis/AAC/VP8/AV1/H.264-in-MKV are not yet supported).
+  This is where the subcommand flags become a pipeline.
 
 The subcommands are a **ladder of escalating desperation**, each step engaging a
 deeper module: `identify` → `clip` (file opens, just artifacts) → `rescue`

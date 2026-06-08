@@ -166,6 +166,19 @@ is nothing saying where samples begin. Two ways forward:
   picture*. It writes `<name>.donor.mp4`, which you then hand to
   `rescue --reference`.
 
+### Matroska / WebM (beheaded)
+
+A beheaded `.mkv`/`.webm` loses its `EBML` header and often the `Tracks` element
+that names the codecs. basinski re-heads it: it walks the surviving `Cluster`s,
+identifies each track's codec from the frame bytes themselves (VP9 geometry from
+the keyframe, Opus channels from the TOC byte), synthesizes a fresh
+`EBML`+`Segment`+`Info`+`Tracks` head, and copies the clusters back verbatim —
+**it never re-encodes**. This works because Matroska's seek offsets are
+Segment-relative, so a regrown head doesn't invalidate anything.
+
+Currently reconstructed without a donor: **VP9 video, Opus audio**. (VP8, AV1,
+and H.264-in-MKV, plus donor-based transplant for Vorbis/AAC, are on the way.)
+
 **The last mile.** A transplanted stream carries no timing of its own, so it
 may come out overcranked. basinski salvages the AAC audio from the gaps
 between video frames, and that audio is a clock: it prints the frame rate it
@@ -235,6 +248,9 @@ date; re-run it after upgrading.
 - A truncation that lands mid-GOP costs the trailing B-frames; the last
   recovered reference frame then displays a beat early. Data that died
   stays dead.
+- Beheaded Matroska with **Vorbis or AAC** audio can't be re-headed from frames
+  alone — those codecs hide their setup data (codebooks / AudioSpecificConfig) in
+  the lost header. A donor-based transplant is planned.
 - The whole file is read into memory; fine for phone videos, rude for 100 GB
   masters.
 - `K` detection is verified against the data (≥80% of sampled video samples
