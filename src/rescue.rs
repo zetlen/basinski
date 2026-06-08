@@ -14,6 +14,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::ffx;
 use crate::forensics::{self, Finding};
+use crate::matroska;
+use crate::mkv_codecs::Codec;
 use crate::mp4::{self, Analysis};
 use crate::transplant;
 
@@ -69,7 +71,12 @@ pub fn rescue(input: &Path, output: Option<PathBuf>, opts: &Options) -> Result<(
             let out = output.unwrap_or_else(|| default_output(input, "rescued", "mp4"));
             rescue_intact(input, &out, opts)
         }
-        Analysis::NoMoov => rescue_headerless_stream(input, output, &data, &findings, opts),
+        Analysis::NoMoov => match matroska::analyze(&data) {
+            matroska::Analysis::Heavy(h) => rescue_matroska(input, output, &data, h, opts),
+            // Intact Matroska / no structure: let the headerless path probe it
+            // (ffprobe reads intact Matroska; truly unknown data falls through).
+            _ => rescue_headerless_stream(input, output, &data, &findings, opts),
+        },
     }
 }
 
@@ -168,6 +175,112 @@ fn rescue_head_truncated_mp4(
 }
 
 // ---------------------------------------------------------------------------
+// Reconstructive: heavily-beheaded Matroska/WebM (only clusters survive)
+// ---------------------------------------------------------------------------
+
+fn rescue_matroska(
+    input: &Path,
+    output: Option<PathBuf>,
+    data: &[u8],
+    h: matroska::Heavy,
+    opts: &Options,
+) -> Result<()> {
+    println!("\n  diagnosis: beheaded Matroska/WebM — only clusters survived");
+    println!(
+        "    bytes lost before first clean cluster : {} (~head + first cluster)",
+        h.bytes_lost
+    );
+    for t in &h.tracks {
+        println!("    track {}: {:?}", t.number, t.codec);
+    }
+
+    if opts.reference.is_some() {
+        println!(
+            "  (note: --reference is not used for Matroska/WebM yet; donor-based transplant is planned)"
+        );
+    }
+
+    // Honest failure: a track whose parameters lived in the lost header and
+    // cannot be synthesized from frames. Transplant (donor) arrives in Plan 2.
+    for t in &h.tracks {
+        if let Codec::NeedsDonor { hint } = t.codec {
+            bail!(
+                "track {} ({hint}) keeps its parameters in the lost header, which \
+                 basinski can't synthesize from the frames alone. This version \
+                 re-heads VP9 video + Opus audio only; donor-based Matroska \
+                 transplant for other codecs is planned but not yet available.",
+                t.number
+            );
+        }
+    }
+
+    let webm = matroska::all_webm_legal(&h.tracks);
+    let ext = if webm { "webm" } else { "mkv" };
+    let out = output.unwrap_or_else(|| default_output(input, "rescued", ext));
+
+    // Choose the playback start at the container level: the first cluster led by
+    // a true keyframe gives clean playback from frame one (no ffmpeg clip).
+    // --no-clip keeps everything from the first surviving cluster instead.
+    let start = if opts.no_clip {
+        h.first_cluster
+    } else {
+        h.first_keyframe_cluster.unwrap_or(h.first_cluster)
+    };
+    if opts.no_clip {
+        println!(
+            "  (--no-clip: starting at first surviving cluster; leading mid-GOP frames may artifact)"
+        );
+    } else if h.first_keyframe_cluster.is_none() {
+        println!(
+            "  ⚠ no keyframe-led cluster found in scan window — starting mid-GOP, expect leading artifacts"
+        );
+    } else if start > h.first_cluster {
+        println!("  ✂ starting at first keyframe-led cluster (offset {start})");
+    }
+
+    let rebuilt = matroska::reconstruct(data, &h, start)?;
+    let head_len = rebuilt.len() - (data.len() - start);
+    let temp = out.with_extension(format!("rehead.{ext}"));
+    fs::write(&temp, &rebuilt).with_context(|| format!("writing {}", temp.display()))?;
+    println!(
+        "\n  ☼ synthesized {head_len}-byte head (EBML + Segment + Info + Tracks) → {}",
+        temp.display()
+    );
+
+    let probe = ffx::probe(&temp)?
+        .context("reconstruction produced a file ffprobe cannot read — head may be wrong")?;
+    println!("  container restored: {}", probe.summary());
+
+    // Stream-copy remux: ffmpeg's own muxer rewrites the blocks cleanly and
+    // launders the benign VP9 parser chatter, yielding a pristine container.
+    ffx::remux_copy(&temp, &out)?;
+    if !opts.keep_temp {
+        let _ = fs::remove_file(&temp);
+    }
+
+    // Validate against the decoder (the basinski contract). A clean keyframe-led
+    // start should decode cleanly; errors here mean the reconstruction is wrong
+    // — most often a misidentified codec (Plan 1 only re-heads VP9 + Opus) or
+    // clusters too damaged to use. Don't hand back a confidently-wrong file.
+    let errs = ffx::decode_errors(&out).unwrap_or(0);
+    if errs == 0 {
+        println!("  ✓ decodes clean (0 errors)");
+    } else if opts.no_clip {
+        println!("  ⚠ {errs} decode error line(s) — expected with --no-clip (mid-GOP start)");
+    } else {
+        let _ = fs::remove_file(&out);
+        bail!(
+            "reconstructed file does not decode cleanly ({errs} error line(s)). \
+             The codec identification is likely wrong (this version re-heads VP9 \
+             video + Opus audio only) or the surviving clusters are too damaged. \
+             Re-run with --no-clip to write the file anyway for inspection."
+        );
+    }
+
+    finish(input, &out, opts)
+}
+
+// ---------------------------------------------------------------------------
 // Intact container — maybe artifacted, maybe just fine
 // ---------------------------------------------------------------------------
 
@@ -251,6 +364,13 @@ fn rescue_headerless_stream(
 
     // The user brought a donor: they know this is an MP4 body. Transplant.
     if let Some(ref_path) = opts.reference.clone() {
+        if data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+            bail!(
+                "this is a Matroska/WebM file; the MP4 moov transplant doesn't \
+                 apply here, and donor-based Matroska transplant is not yet \
+                 implemented."
+            );
+        }
         return rescue_with_donor(input, output, data, &ref_path, opts);
     }
 

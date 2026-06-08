@@ -409,6 +409,14 @@ pub fn remux(input: &Path, output: &Path) -> Result<()> {
     )
 }
 
+/// Stream-copy every track into a Matroska/WebM container (no transcode). The
+/// container is chosen by `output`'s extension (`.webm` or `.mkv`). This also
+/// launders benign codec-parser chatter: ffmpeg's own muxer rewrites the blocks,
+/// so the result decodes clean even when the input made the VP9 parser grumble.
+pub fn remux_copy(input: &Path, output: &Path) -> Result<()> {
+    run_ffmpeg(&["-map", "0", "-c", "copy"], input, output, &[])
+}
+
 /// The Correct Format. Video → H.264/AAC MP4. Audio → MP3.
 /// This is not configurable. That is the joke, and also the truth.
 pub fn to_correct_format(input: &Path, output: &Path, video: bool) -> Result<()> {
