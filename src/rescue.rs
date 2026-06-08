@@ -194,15 +194,19 @@ fn rescue_matroska(
         println!("    track {}: {:?}", t.number, t.codec);
     }
 
+    if opts.reference.is_some() {
+        println!("  (note: --reference is not used for Matroska/WebM yet; donor-based transplant is planned)");
+    }
+
     // Honest failure: a track whose parameters lived in the lost header and
     // cannot be synthesized from frames. Transplant (donor) arrives in Plan 2.
     for t in &h.tracks {
         if let Codec::NeedsDonor { hint } = t.codec {
             bail!(
-                "track {} ({hint}) keeps its parameters in the lost Tracks header.\n\
-                 basinski can't synthesize them from the frames alone. A donor-based\n\
-                 transplant (--reference <sibling from the same encoder>) is the next\n\
-                 rung, but is not yet implemented for Matroska.",
+                "track {} ({hint}) keeps its parameters in the lost header, which \
+                 basinski can't synthesize from the frames alone. This version \
+                 re-heads VP9 video + Opus audio only; donor-based Matroska \
+                 transplant for other codecs is planned but not yet available.",
                 t.number
             );
         }
@@ -244,18 +248,29 @@ fn rescue_matroska(
     // Stream-copy remux: ffmpeg's own muxer rewrites the blocks cleanly and
     // launders the benign VP9 parser chatter, yielding a pristine container.
     ffx::remux_copy(&temp, &out)?;
-
-    // Validate the reconstruction against the decoder (the basinski contract).
-    let errs = ffx::decode_errors(&out).unwrap_or(0);
-    if errs == 0 {
-        println!("  ✓ decodes clean (0 errors)");
-    } else {
-        println!("  ⚠ {errs} decode error line(s) remain — inspect the output");
-    }
-
     if !opts.keep_temp {
         let _ = fs::remove_file(&temp);
     }
+
+    // Validate against the decoder (the basinski contract). A clean keyframe-led
+    // start should decode cleanly; errors here mean the reconstruction is wrong
+    // — most often a misidentified codec (Plan 1 only re-heads VP9 + Opus) or
+    // clusters too damaged to use. Don't hand back a confidently-wrong file.
+    let errs = ffx::decode_errors(&out).unwrap_or(0);
+    if errs == 0 {
+        println!("  ✓ decodes clean (0 errors)");
+    } else if opts.no_clip {
+        println!("  ⚠ {errs} decode error line(s) — expected with --no-clip (mid-GOP start)");
+    } else {
+        let _ = fs::remove_file(&out);
+        bail!(
+            "reconstructed file does not decode cleanly ({errs} error line(s)). \
+             The codec identification is likely wrong (this version re-heads VP9 \
+             video + Opus audio only) or the surviving clusters are too damaged. \
+             Re-run with --no-clip to write the file anyway for inspection."
+        );
+    }
+
     finish(input, &out, opts)
 }
 
@@ -343,6 +358,13 @@ fn rescue_headerless_stream(
 
     // The user brought a donor: they know this is an MP4 body. Transplant.
     if let Some(ref_path) = opts.reference.clone() {
+        if data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+            bail!(
+                "this is a Matroska/WebM file; the MP4 moov transplant doesn't \
+                 apply here, and donor-based Matroska transplant is not yet \
+                 implemented."
+            );
+        }
         return rescue_with_donor(input, output, data, &ref_path, opts);
     }
 

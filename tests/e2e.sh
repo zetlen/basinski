@@ -135,4 +135,66 @@ else
   echo "skip: WebM reconstructive case needs libvpx-vp9 + libopus (not found)"
 fi
 
+# --- Honest-refusal test: unsupported codec beheaded WebM must exit non-zero ---
+# Preferred: VP9 video + Vorbis audio (exercises audio-codec mislabel guard).
+# Fallback:  VP8 video + Opus audio (exercises video-codec mislabel guard).
+# Skip if neither encoder is available.
+if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libvpx-vp9 \
+   && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libvorbis; then
+
+  echo "==> WebM refusal: synthesizing VP9+Vorbis fixture (unsupported audio codec)"
+  ffmpeg -v error -y \
+    -f lavfi -i "testsrc2=size=320x240:rate=30:duration=3" \
+    -f lavfi -i "sine=frequency=440:duration=3" \
+    -c:v libvpx-vp9 -b:v 200k -g 24 -c:a libvorbis -b:a 64k \
+    "$DIR/src_unsupported.webm"
+
+  python3 - "$DIR/src_unsupported.webm" "$DIR/beheaded_unsupported.webm" <<'PY'
+import sys
+data = open(sys.argv[1], "rb").read()
+sig = bytes.fromhex("1F43B675")
+first = data.find(sig)
+second = data.find(sig, first + 1)
+cut = second if second != -1 else first
+open(sys.argv[2], "wb").write(data[cut:])
+PY
+
+  echo "==> WebM refusal: basinski rescue must refuse (non-zero exit) on VP9+Vorbis"
+  if "$BIN" rescue "$DIR/beheaded_unsupported.webm" -o "$DIR/should_not_exist.webm" 2>/dev/null; then
+    echo "FAIL: basinski produced output for an unsupported-codec beheaded WebM (should refuse)" >&2
+    exit 1
+  fi
+  echo "PASS: unsupported-codec beheaded WebM refused loudly"
+
+elif ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libvpx \
+     && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libopus; then
+
+  echo "==> WebM refusal: synthesizing VP8+Opus fixture (unsupported video codec)"
+  ffmpeg -v error -y \
+    -f lavfi -i "testsrc2=size=320x240:rate=30:duration=3" \
+    -f lavfi -i "sine=frequency=440:duration=3" \
+    -c:v libvpx -b:v 200k -g 24 -c:a libopus -b:a 64k \
+    "$DIR/src_unsupported.webm"
+
+  python3 - "$DIR/src_unsupported.webm" "$DIR/beheaded_unsupported.webm" <<'PY'
+import sys
+data = open(sys.argv[1], "rb").read()
+sig = bytes.fromhex("1F43B675")
+first = data.find(sig)
+second = data.find(sig, first + 1)
+cut = second if second != -1 else first
+open(sys.argv[2], "wb").write(data[cut:])
+PY
+
+  echo "==> WebM refusal: basinski rescue must refuse (non-zero exit) on VP8+Opus"
+  if "$BIN" rescue "$DIR/beheaded_unsupported.webm" -o "$DIR/should_not_exist.webm" 2>/dev/null; then
+    echo "FAIL: basinski produced output for an unsupported-codec beheaded WebM (should refuse)" >&2
+    exit 1
+  fi
+  echo "PASS: unsupported-codec beheaded WebM refused loudly"
+
+else
+  echo "skip: unsupported-codec WebM refusal test needs libvorbis (VP9+Vorbis) or libvpx/VP8 (VP8+Opus) — neither found"
+fi
+
 echo "PASS"

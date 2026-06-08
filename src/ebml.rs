@@ -15,7 +15,10 @@ pub fn read_vint(buf: &[u8], pos: usize) -> Option<(u64, usize)> {
     if pos + len > buf.len() {
         return None;
     }
-    let mut val = (first & (0xFF >> len)) as u64;
+    // len can be 8 (an 8-byte vint, lead byte 0x01); 0xFFu8 >> 8 would panic, so
+    // widen to u16 — for len==8 the first byte contributes no value bits (mask 0).
+    let mask = (0xFFu16 >> len) as u8;
+    let mut val = (first & mask) as u64;
     for k in 1..len {
         val = (val << 8) | buf[pos + k] as u64;
     }
@@ -179,6 +182,12 @@ mod tests {
         assert_eq!(read_vint(&[0x40, 0x7F], 0), Some((127, 2)));
         // 0x4001 -> value 1, length 2.
         assert_eq!(read_vint(&[0x40, 0x01], 0), Some((1, 2)));
+    }
+
+    #[test]
+    fn vint_reads_eight_byte_without_panicking() {
+        // Lead byte 0x01 marks an 8-byte vint; value bits are the low 7 bytes.
+        assert_eq!(read_vint(&[0x01, 0, 0, 0, 0, 0, 0, 0x05], 0), Some((5, 8)));
     }
 
     #[test]
