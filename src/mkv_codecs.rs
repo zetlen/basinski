@@ -9,18 +9,36 @@ use std::collections::BTreeSet;
 /// What a track's surviving frames revealed about its codec.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Codec {
-    Vp9 { width: u32, height: u32 },
+    Vp9 {
+        width: u32,
+        height: u32,
+    },
     #[allow(dead_code)] // Constructed in Plan 3 (VP8/AV1/H.264-in-MKV).
-    Vp8 { width: u32, height: u32 },
+    Vp8 {
+        width: u32,
+        height: u32,
+    },
     #[allow(dead_code)] // Constructed in Plan 3 (VP8/AV1/H.264-in-MKV).
-    Av1 { width: u32, height: u32, config: Vec<u8> },
-    Opus { channels: u8 },
+    Av1 {
+        width: u32,
+        height: u32,
+        config: Vec<u8>,
+    },
+    Opus {
+        channels: u8,
+    },
     #[allow(dead_code)] // Constructed in Plan 3 (VP8/AV1/H.264-in-MKV).
-    H264 { codec_private: Vec<u8>, width: u32, height: u32 },
+    H264 {
+        codec_private: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
     /// Parameters live in the lost `Tracks` and cannot be synthesized from
     /// frames (Vorbis codebooks, AAC AudioSpecificConfig) or could not be
     /// identified at all — needs a `--reference` donor.
-    NeedsDonor { hint: &'static str },
+    NeedsDonor {
+        hint: &'static str,
+    },
 }
 
 /// Identify a track's codec from a sample of its frames. Each entry is
@@ -31,12 +49,18 @@ pub fn sniff(frames: &[(bool, Vec<u8>)]) -> Codec {
     // first, then any frame (Matroska keyframe flags can be unreliable).
     for &(key, ref f) in frames {
         if key && let Some((w, h)) = vp9_dims(f) {
-            return Codec::Vp9 { width: w, height: h };
+            return Codec::Vp9 {
+                width: w,
+                height: h,
+            };
         }
     }
     for (_key, f) in frames {
         if let Some((w, h)) = vp9_dims(f) {
-            return Codec::Vp9 { width: w, height: h };
+            return Codec::Vp9 {
+                width: w,
+                height: h,
+            };
         }
     }
     // Audio: Opus packets share a constant TOC config (top 5 bits) across a clip.
@@ -55,9 +79,13 @@ pub fn sniff(frames: &[(bool, Vec<u8>)]) -> Codec {
         && let Some((_, f0)) = frames.first()
         && let Some(&toc) = f0.first()
     {
-        return Codec::Opus { channels: opus_channels(toc) };
+        return Codec::Opus {
+            channels: opus_channels(toc),
+        };
     }
-    Codec::NeedsDonor { hint: "unrecognized codec (Plan 1 handles VP9 + Opus)" }
+    Codec::NeedsDonor {
+        hint: "unrecognized codec (Plan 1 handles VP9 + Opus)",
+    }
 }
 
 /// Build a `TrackEntry` element for a sniffed codec. Panics on `NeedsDonor`
@@ -232,7 +260,13 @@ mod tests {
     #[test]
     fn sniff_identifies_vp9_from_keyframe() {
         let frames = vec![(true, VP9_KEYFRAME.to_vec())];
-        assert_eq!(sniff(&frames), Codec::Vp9 { width: 1920, height: 1080 });
+        assert_eq!(
+            sniff(&frames),
+            Codec::Vp9 {
+                width: 1920,
+                height: 1080
+            }
+        );
     }
 
     #[test]
@@ -254,10 +288,22 @@ mod tests {
 
     #[test]
     fn track_entry_for_vp9_has_codec_id_and_dims() {
-        let bytes = track_entry(1, &Codec::Vp9 { width: 1920, height: 1080 });
+        let bytes = track_entry(
+            1,
+            &Codec::Vp9 {
+                width: 1920,
+                height: 1080,
+            },
+        );
         // Contains the CodecID string and a TrackType=1 (video).
         assert!(find(&bytes, b"V_VP9").is_some());
-        assert!(find(&bytes, &crate::ebml::uint(crate::ebml::ID_PIXEL_WIDTH, 1920)).is_some());
+        assert!(
+            find(
+                &bytes,
+                &crate::ebml::uint(crate::ebml::ID_PIXEL_WIDTH, 1920)
+            )
+            .is_some()
+        );
         assert!(find(&bytes, &crate::ebml::uint(crate::ebml::ID_TRACK_TYPE, 1)).is_some());
     }
 

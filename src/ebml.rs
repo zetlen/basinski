@@ -128,7 +128,11 @@ pub fn el(id: u32, payload: &[u8]) -> Vec<u8> {
 
 /// An unsigned-integer element, big-endian, minimal length (>= 1 byte).
 pub fn uint(id: u32, value: u64) -> Vec<u8> {
-    let mut payload: Vec<u8> = value.to_be_bytes().into_iter().skip_while(|&b| b == 0).collect();
+    let mut payload: Vec<u8> = value
+        .to_be_bytes()
+        .into_iter()
+        .skip_while(|&b| b == 0)
+        .collect();
     if payload.is_empty() {
         payload.push(0);
     }
@@ -246,19 +250,19 @@ mod tests {
     #[test]
     fn builders_emit_canonical_bytes() {
         // el(): CodecID "V_VP9" -> id 0x86, size 0x85, payload.
-        assert_eq!(el(ID_CODEC_ID, b"V_VP9"), vec![0x86, 0x85, b'V', b'_', b'V', b'P', b'9']);
+        assert_eq!(
+            el(ID_CODEC_ID, b"V_VP9"),
+            vec![0x86, 0x85, b'V', b'_', b'V', b'P', b'9']
+        );
         // uint(): PixelWidth 1920 = 0x0780 -> id 0xB0, size 0x82, big-endian value.
         assert_eq!(uint(ID_PIXEL_WIDTH, 1920), vec![0xB0, 0x82, 0x07, 0x80]);
         // uint() of zero is one zero byte, not empty.
         assert_eq!(uint(ID_CHANNELS, 0), vec![0x9F, 0x81, 0x00]);
         // float32(): 48000.0 -> id 0xB5, size 0x84, IEEE-754 big-endian.
-        assert_eq!(
-            float32(ID_SAMPLING_FREQ, 48000.0),
-            {
-                let mut v = vec![0xB5, 0x84];
-                v.extend_from_slice(&48000.0f32.to_be_bytes());
-                v
-            }
-        );
+        assert_eq!(float32(ID_SAMPLING_FREQ, 48000.0), {
+            let mut v = vec![0xB5, 0x84];
+            v.extend_from_slice(&48000.0f32.to_be_bytes());
+            v
+        });
     }
 }

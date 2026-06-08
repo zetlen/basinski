@@ -14,9 +14,9 @@ use anyhow::{Context, Result, bail};
 
 use crate::ffx;
 use crate::forensics::{self, Finding};
-use crate::mp4::{self, Analysis};
 use crate::matroska;
 use crate::mkv_codecs::Codec;
+use crate::mp4::{self, Analysis};
 use crate::transplant;
 
 pub struct Options {
@@ -195,7 +195,9 @@ fn rescue_matroska(
     }
 
     if opts.reference.is_some() {
-        println!("  (note: --reference is not used for Matroska/WebM yet; donor-based transplant is planned)");
+        println!(
+            "  (note: --reference is not used for Matroska/WebM yet; donor-based transplant is planned)"
+        );
     }
 
     // Honest failure: a track whose parameters lived in the lost header and
@@ -225,9 +227,13 @@ fn rescue_matroska(
         h.first_keyframe_cluster.unwrap_or(h.first_cluster)
     };
     if opts.no_clip {
-        println!("  (--no-clip: starting at first surviving cluster; leading mid-GOP frames may artifact)");
+        println!(
+            "  (--no-clip: starting at first surviving cluster; leading mid-GOP frames may artifact)"
+        );
     } else if h.first_keyframe_cluster.is_none() {
-        println!("  ⚠ no keyframe-led cluster found in scan window — starting mid-GOP, expect leading artifacts");
+        println!(
+            "  ⚠ no keyframe-led cluster found in scan window — starting mid-GOP, expect leading artifacts"
+        );
     } else if start > h.first_cluster {
         println!("  ✂ starting at first keyframe-led cluster (offset {start})");
     }

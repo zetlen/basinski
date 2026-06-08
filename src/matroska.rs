@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::ebml::{self, read_element};
 use crate::mkv_codecs::{self, Codec};
@@ -267,7 +267,10 @@ pub fn all_webm_legal(tracks: &[Track]) -> bool {
 pub fn build_head(tracks: &[Track], doctype: &str) -> Result<Vec<u8>> {
     for t in tracks {
         if let Codec::NeedsDonor { hint } = &t.codec {
-            bail!("track {} cannot be re-headed without a donor ({hint})", t.number);
+            bail!(
+                "track {} cannot be re-headed without a donor ({hint})",
+                t.number
+            );
         }
     }
 
@@ -324,9 +327,16 @@ pub fn build_head(tracks: &[Track], doctype: &str) -> Result<Vec<u8>> {
 /// `--no-clip`).
 pub fn reconstruct(data: &[u8], h: &Heavy, start_offset: usize) -> Result<Vec<u8>> {
     if start_offset > data.len() {
-        bail!("start_offset {start_offset} out of bounds for {}-byte buffer", data.len());
+        bail!(
+            "start_offset {start_offset} out of bounds for {}-byte buffer",
+            data.len()
+        );
     }
-    let doctype = if all_webm_legal(&h.tracks) { "webm" } else { "matroska" };
+    let doctype = if all_webm_legal(&h.tracks) {
+        "webm"
+    } else {
+        "matroska"
+    };
     let mut out = build_head(&h.tracks, doctype)?;
     out.extend_from_slice(&data[start_offset..]);
     Ok(out)
@@ -335,7 +345,7 @@ pub fn reconstruct(data: &[u8], h: &Heavy, start_offset: usize) -> Result<Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ebml::{el, uint, ID_CLUSTER, ID_TIMECODE};
+    use crate::ebml::{ID_CLUSTER, ID_TIMECODE, el, uint};
 
     /// Build a synthetic SimpleBlock element: track 1, unlaced, given keyframe
     /// flag and frame bytes.
@@ -358,8 +368,22 @@ mod tests {
         let end = walk_cluster(&cluster, 0, |b| got.push(b));
         assert_eq!(end, Some(cluster.len()));
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0], SampledBlock { track: 1, keyframe: true, frame: b"VIDEO".to_vec() });
-        assert_eq!(got[1], SampledBlock { track: 2, keyframe: false, frame: b"AUDIO".to_vec() });
+        assert_eq!(
+            got[0],
+            SampledBlock {
+                track: 1,
+                keyframe: true,
+                frame: b"VIDEO".to_vec()
+            }
+        );
+        assert_eq!(
+            got[1],
+            SampledBlock {
+                track: 2,
+                keyframe: false,
+                frame: b"AUDIO".to_vec()
+            }
+        );
     }
 
     #[test]
@@ -411,7 +435,13 @@ mod tests {
         assert_eq!(h.first_keyframe_cluster, Some(cluster_off));
         assert_eq!(h.tracks.len(), 2);
         assert_eq!(h.tracks[0].number, 1);
-        assert_eq!(h.tracks[0].codec, Codec::Vp9 { width: 1920, height: 1080 });
+        assert_eq!(
+            h.tracks[0].codec,
+            Codec::Vp9 {
+                width: 1920,
+                height: 1080
+            }
+        );
         assert_eq!(h.tracks[1].number, 2);
         assert_eq!(h.tracks[1].codec, Codec::Opus { channels: 2 });
     }
@@ -419,8 +449,17 @@ mod tests {
     #[test]
     fn build_head_emits_ebml_and_tracks() {
         let tracks = vec![
-            Track { number: 1, codec: Codec::Vp9 { width: 1920, height: 1080 } },
-            Track { number: 2, codec: Codec::Opus { channels: 2 } },
+            Track {
+                number: 1,
+                codec: Codec::Vp9 {
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            Track {
+                number: 2,
+                codec: Codec::Opus { channels: 2 },
+            },
         ];
         let head = build_head(&tracks, "webm").unwrap();
         // Starts with EBML magic.
@@ -452,7 +491,9 @@ mod tests {
         let mut buf = vec![0xAB; 8];
         buf.extend_from_slice(&cluster);
 
-        let Analysis::Heavy(h) = analyze(&buf) else { panic!() };
+        let Analysis::Heavy(h) = analyze(&buf) else {
+            panic!()
+        };
         let out = reconstruct(&buf, &h, h.first_cluster).unwrap();
         // The tail of the output is the surviving clusters, byte-for-byte.
         assert!(out.ends_with(&cluster));
@@ -482,7 +523,9 @@ mod tests {
         let c2_off = buf.len();
         buf.extend_from_slice(&c2);
 
-        let Analysis::Heavy(h) = analyze(&buf) else { panic!("expected Heavy") };
+        let Analysis::Heavy(h) = analyze(&buf) else {
+            panic!("expected Heavy")
+        };
         assert_eq!(h.first_cluster, c1_off);
         assert_eq!(h.first_keyframe_cluster, Some(c2_off));
         assert_eq!(h.bytes_lost, c2_off);
@@ -511,9 +554,17 @@ mod tests {
         buf.extend_from_slice(&c1);
         buf.extend_from_slice(&c2);
 
-        let Analysis::Heavy(h) = analyze(&buf) else { panic!("expected Heavy") };
+        let Analysis::Heavy(h) = analyze(&buf) else {
+            panic!("expected Heavy")
+        };
         let t1 = h.tracks.iter().find(|t| t.number == 1).expect("track 1");
-        assert_eq!(t1.codec, Codec::Vp9 { width: 1920, height: 1080 });
+        assert_eq!(
+            t1.codec,
+            Codec::Vp9 {
+                width: 1920,
+                height: 1080
+            }
+        );
     }
 
     fn window(haystack: &[u8], needle: &[u8]) -> Option<usize> {
